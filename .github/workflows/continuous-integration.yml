@@ -22,162 +22,45 @@ env:
   LC_ALL: "C"
 
 jobs:
-  coding-standards:
-    name: "Coding standards"
-    runs-on: "ubuntu-latest"
-
-    steps:
-      - name: "Checkout repository"
-        uses: "actions/checkout@v3.5.3"
-
-      - name: "Check formatting (clang-format)"
-        uses: "jidicula/clang-format-action@v4.11.0"
-        with:
-          clang-format-version: "16"
-          check-path: "src"
-          exclude-regex: "^.*arginfo\\.h$"
-
-  code-coverage:
-    name: "Code coverage"
-    runs-on: "ubuntu-latest"
-
+  pecl:
     strategy:
-      fail-fast: false
       matrix:
-        php:
-          - "8.2"
-        icu:
-          - "70.1"
-
-    steps:
-      - name: "Checkout repository"
-        uses: "actions/checkout@v3.5.3"
-
-      - name: "Install Criterion"
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libcriterion3 libcriterion-dev
-
-      - name: "Install PHP"
-        uses: "shivammathur/setup-php@2.25.5"
-        with:
-          php-version: "${{ matrix.php }}"
-          extensions: "intl-${{ matrix.icu }}"
-          coverage: "none"
-        env:
-          debug: true
-          phpts: "ts"
-
-      - name: "Install dependencies (Composer)"
-        uses: "ramsey/composer-install@2.2.0"
-
-      - name: "Build and install ecma_intl"
-        run: |
-          phpize
-          ./configure --enable-ecma_intl --enable-criterion
-          make -j$(nproc)
-          php -d extension="$PWD/modules/ecma_intl.so" --ri ecma_intl
-
-      - name: "Run tests (Criterion)"
-        run: "composer dev:test:criterion"
-
-      - name: "Publish coverage report to Codecov"
-        uses: "codecov/codecov-action@v3.1.4"
-        with:
-          gcov: true
-          gcov_include: "src/**/*"
-          gcov_ignore: "tests/**/*"
-          flags: unittests
-
-  memcheck:
-    name: "Test for Memory Leaks"
-    needs: ["coding-standards", "code-coverage"]
+        include:
+          - php-image: "php:8.2-cli-alpine3.18"
+            deps-command: "apk add $PHPIZE_DEPS git icu-dev"
+          - php-image: "php:8.2-cli-bookworm"
+            deps-command: "apt update && apt install -qy git libicu-dev"
+    name: "Install with pecl on ${{ matrix.php-image }}"
     runs-on: "ubuntu-latest"
-
+    container: ${{ matrix.php-image }}
     steps:
+      - name: "Install system dependencies"
+        run: ${{ matrix.deps-command }}
+
       - name: "Checkout repository"
-        uses: "actions/checkout@v3.5.3"
+        uses: "actions/checkout@v3"
 
-      - name: "Install Valgrind"
+      - name: "Create temporary directory"
+        run: cd "$(mktemp -d)"
+
+      - name: "Create package"
+        run: pecl package "$GITHUB_WORKSPACE/package.xml"
+
+      - name: "Compile package"
+        run: printf '' | MAKE="make -j$(nproc)" pecl install ecma_intl-*.tgz
+
+      - name: "Enable extension"
+        run: docker-php-ext-enable ecma_intl
+
+      - name: "Check for PHP startup warnings"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y valgrind
-          valgrind --version
+          php -d display_errors=stderr -d display_startup_errors=1 -d error_reporting=-1 -r ';' 2>./php-startup-warnings
+          if [ -s ./php-startup-warnings ]; then
+            echo 'The PHP extension was successfully installed, but PHP raised these warnings:' >&2
+            cat ./php-startup-warnings >&2
+            exit 1
+          fi
+          echo "PHP didn't raise any warnings at startup."
 
-      - name: "Install PHP"
-        uses: "shivammathur/setup-php@2.25.5"
-        with:
-          php-version: "latest"
-          extensions: "intl-73.2"
-          coverage: "none"
-        env:
-          debug: true
-          phpts: "ts"
-
-      - name: "Install dependencies (Composer)"
-        uses: "ramsey/composer-install@2.2.0"
-
-      - name: "Build and install ecma_intl"
-        run: |
-          phpize
-          ./configure --enable-ecma_intl
-          make -j$(nproc)
-          php -d extension="$PWD/modules/ecma_intl.so" --ri ecma_intl
-
-      - name: "Run tests (PHPT with memcheck)"
-        run: "composer dev:test:memcheck"
-
-  tests:
-    name: "Tests: PHP ${{ matrix.php }}, ICU ${{ matrix.icu }}"
-    needs: ["coding-standards", "code-coverage"]
-    runs-on: "ubuntu-latest"
-
-    strategy:
-      fail-fast: false
-      matrix:
-        php:
-          - "8.2"
-        icu:
-          - "70.1"
-          - "71.1"
-          - "72.1"
-          - "73.1"
-          - "73.2"
-
-    steps:
-      - name: "Checkout repository"
-        uses: "actions/checkout@v3.5.3"
-
-      - name: "Install Criterion"
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libcriterion3 libcriterion-dev
-
-      - name: "Install PHP"
-        uses: "shivammathur/setup-php@2.25.5"
-        with:
-          php-version: "${{ matrix.php }}"
-          extensions: "intl-${{ matrix.icu }}"
-          coverage: "none"
-        env:
-          debug: true
-          phpts: "ts"
-
-      - name: "Install dependencies (Composer)"
-        uses: "ramsey/composer-install@2.2.0"
-
-      - name: "Build and install ecma_intl"
-        run: |
-          phpize
-          ./configure --enable-ecma_intl --enable-criterion
-          make -j$(nproc)
-          php -d extension="$PWD/modules/ecma_intl.so" --ri ecma_intl
-
-      - name: "Run tests (PHPT)"
-        run: "composer dev:test:phpt"
-
-      - name: "Run tests (Criterion)"
-        run: "composer dev:test:criterion"
-
-      - name: "Run tests (Pest)"
-        run: "composer dev:test:pest -- --colors=always"
+      - name: Inspect extension
+        run: php --ri ecma_intl
